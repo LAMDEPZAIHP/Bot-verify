@@ -1,48 +1,104 @@
+const http = require("http");
+
 const {
   Client,
   GatewayIntentBits,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Events
+  Events,
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require("discord.js");
 
-const fs = require("fs");
+// =========================
+// CONFIG
+// =========================
+
+const TOKEN = process.env.TOKEN;
+const PORT = process.env.PORT || 3000;
+
+if (!TOKEN) {
+  console.error("❌ Thiếu biến môi trường TOKEN.");
+  process.exit(1);
+}
+
+// =========================
+// RENDER WEB SERVER
+// =========================
+
+http.createServer((req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/plain; charset=utf-8"
+  });
+
+  res.end("VERIFY BOT đang hoạt động!");
+}).listen(PORT, () => {
+  console.log(`🌐 Web server đang chạy trên port ${PORT}`);
+});
+
+// =========================
+// DISCORD CLIENT
+// =========================
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const TOKEN = process.env.TOKEN;
-const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID;
+// Lưu tiến trình bấm nút
+const progress = new Map();
 
-// Lưu tiến trình người dùng
-const FILE = "./data.json";
+// =========================
+// SLASH COMMAND
+// =========================
 
-let data = {};
-if (fs.existsSync(FILE)) {
+const verifyCommand = new SlashCommandBuilder()
+  .setName("verify")
+  .setDescription("Mở bảng xác minh 5 nút")
+  .toJSON();
+
+// =========================
+// BOT ONLINE
+// =========================
+
+client.once(Events.ClientReady, async () => {
+  console.log(`🤖 Bot đã online: ${client.user.tag}`);
+
   try {
-    data = JSON.parse(fs.readFileSync(FILE, "utf8"));
-  } catch {
-    data = {};
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      {
+        body: [verifyCommand]
+      }
+    );
+
+    console.log("✅ Đã đăng ký /verify");
+  } catch (error) {
+    console.error("❌ Lỗi đăng ký /verify:", error);
   }
-}
-
-function save() {
-  fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
-}
-
-client.once(Events.ClientReady, () => {
-  console.log(`Bot đã online: ${client.user.tag}`);
 });
+
+// =========================
+// INTERACTIONS
+// =========================
 
 client.on(Events.InteractionCreate, async (interaction) => {
 
-  // Lệnh /verify
+  // =======================
+  // /verify
+  // =======================
+
   if (interaction.isChatInputCommand()) {
-    if (interaction.commandName !== "verify") return;
+
+    if (interaction.commandName !== "verify") {
+      return;
+    }
 
     const row = new ActionRowBuilder().addComponents(
+
       new ButtonBuilder()
         .setCustomId("verify_1")
         .setLabel("1")
@@ -67,81 +123,138 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setCustomId("verify_5")
         .setLabel("5")
         .setStyle(ButtonStyle.Primary)
+
     );
 
     await interaction.reply({
       content:
-        "🔐 **XÁC MINH**\n\nBấm **đủ cả 5 nút** bên dưới để nhận role **Verify**.",
+        "🔐 **XÁC MINH**\n\n" +
+        "Bấm **đủ cả 5 nút** bên dưới để nhận role **Verify**.",
       components: [row]
     });
 
     return;
   }
 
-  // Xử lý 5 nút
+  // =======================
+  // BUTTON
+  // =======================
+
   if (interaction.isButton()) {
 
-    if (!interaction.customId.startsWith("verify_")) return;
+    if (!interaction.customId.startsWith("verify_")) {
+      return;
+    }
 
     const userId = interaction.user.id;
 
-    if (!data[userId]) {
-      data[userId] = [];
+    // Tạo tiến trình cho user
+    if (!progress.has(userId)) {
+      progress.set(userId, new Set());
     }
 
-    const button = interaction.customId;
+    const userProgress = progress.get(userId);
 
-    // Không cho bấm trùng
-    if (!data[userId].includes(button)) {
-      data[userId].push(button);
-      save();
-    }
+    // Ghi nhận nút
+    userProgress.add(interaction.customId);
 
-    const count = data[userId].length;
+    const count = userProgress.size;
 
     // Chưa đủ 5
     if (count < 5) {
+
       await interaction.reply({
         content: `✅ Đã ghi nhận! Tiến độ: **${count}/5**`,
         ephemeral: true
       });
+
       return;
     }
 
-    // Đủ 5
-    const role = interaction.guild.roles.cache.get(VERIFY_ROLE_ID);
+    // =======================
+    // TÌM ROLE VERIFY
+    // =======================
+
+    const role = interaction.guild.roles.cache.find(
+      r => r.name === "Verify"
+    );
 
     if (!role) {
+
       await interaction.reply({
-        content: "❌ Không tìm thấy role Verify. Kiểm tra VERIFY_ROLE_ID.",
+        content: "❌ Không tìm thấy role **Verify**.",
         ephemeral: true
       });
+
       return;
     }
 
-    try {
-      await interaction.member.roles.add(role);
+    // =======================
+    // KIỂM TRA ROLE BOT
+    // =======================
+
+    const botMember = interaction.guild.members.me;
+
+    if (!botMember) {
 
       await interaction.reply({
-        content:
-          "🎉 **Xác minh thành công!**\nBạn đã nhận role **Verify**.",
+        content: "❌ Không lấy được thông tin bot trong server.",
         ephemeral: true
       });
 
-      // Xóa tiến trình để dữ liệu gọn
-      delete data[userId];
-      save();
+      return;
+    }
 
-    } catch (error) {
-      console.error(error);
+    if (role.position >= botMember.roles.highest.position) {
 
       await interaction.reply({
         content:
-          "❌ Bot không thể cấp role. Hãy kiểm tra role của bot có nằm trên role Verify không.",
+          "❌ Bot không thể cấp role **Verify**.\n\n" +
+          "Vào **Cài đặt máy chủ → Vai trò** và kéo role của bot lên **trên Verify**.",
+        ephemeral: true
+      });
+
+      return;
+    }
+
+    // =======================
+    // CẤP ROLE
+    // =======================
+
+    try {
+
+      await interaction.member.roles.add(role);
+
+      // Xóa tiến trình
+      progress.delete(userId);
+
+      await interaction.reply({
+        content:
+          "🎉 **Xác minh thành công!**\n" +
+          "Bạn đã nhận role **Verify**.",
+        ephemeral: true
+      });
+
+      console.log(
+        `✅ Đã cấp Verify cho ${interaction.user.tag}`
+      );
+
+    } catch (error) {
+
+      console.error("❌ Lỗi cấp role:", error);
+
+      await interaction.reply({
+        content:
+          "❌ Không thể cấp role **Verify**.\n" +
+          "Hãy kiểm tra quyền **Quản lý vai trò** của bot.",
         ephemeral: true
       });
     }
   }
 });
+
+// =========================
+// LOGIN
+// =========================
 
 client.login(TOKEN);
